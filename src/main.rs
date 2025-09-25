@@ -2,7 +2,7 @@ use std::{collections::HashMap, time::Duration};
 
 use reqwest::Client;
 
-const ACT_ROUTES: &[(&str, u32)] = &[("51B", 500), ("27", 750), ("E", 1500)];
+const ACT_ROUTES: &[(&str, u32)] = &[("51B", 600), ("27", 800), ("E", 1575)];
 
 #[derive(Clone, Debug, serde::Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -61,13 +61,21 @@ struct Trip {
     stop_latitude: f32,
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let token = "";
+struct StopInfo {
+    route: String,
+    name: String,
+    direction: Option<String>,
+    prediction: Option<chrono::NaiveDateTime>,
+}
+
+async fn fetch_act() -> Result<Vec<StopInfo>, Box<dyn std::error::Error>> {
+    let token = "7EFC6295F8261A1389A1134B9EDEE46B";
 
     let client = Client::builder()
         .timeout(Duration::from_secs(30)) // Set a 30-second request timeout
         .build()?; // Build the client
+
+    let mut stops_info = Vec::new();
 
     for route in ACT_ROUTES {
         let radius_url = format!(
@@ -94,16 +102,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             let predictions_check = client.get(prediction_url).send().await?;
             if predictions_check.status() != 200 {
-                println!("{}: {}: no data", route.0, stop.name);
+                stops_info.push(StopInfo {
+                    route: route.0.to_string(),
+                    name: stop.name.clone(),
+                    direction: None,
+                    prediction: None,
+                });
                 continue;
             }
             let predictions: Vec<Prediction> = predictions_check.json().await?;
+            let mut pushed = false;
             for prediction in &predictions {
+                if prediction.route_name != route.0 {
+                    continue;
+                }
                 if let Some(trip) = trips_by_id.get(&prediction.trip_id) {
-                    println!(
-                        "{} {}: {}: {}",
-                        route.0, trip.direction, stop.name, prediction.predicted_departure,
-                    );
+                    pushed = true;
+                    stops_info.push(StopInfo {
+                        route: route.0.to_string(),
+                        name: stop.name.clone(),
+                        direction: Some(trip.direction.clone()),
+                        prediction: Some(
+                            chrono::NaiveDateTime::parse_from_str(
+                                &prediction.predicted_departure,
+                                "%Y-%m-%dT%H:%M:%S",
+                            )
+                            .unwrap(),
+                        ),
+                    });
                 } else {
                     panic!(
                         "Stop {}: No trip info found for Trip ID {}",
@@ -111,8 +137,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                 }
             }
+            if !pushed {
+                stops_info.push(StopInfo {
+                    route: route.0.to_string(),
+                    name: stop.name.clone(),
+                    direction: None,
+                    prediction: None,
+                });
+            }
         }
     }
+    Ok(stops_info)
+}
 
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let stops = fetch_act().await?;
+    for stop in stops {
+        if let Some(prediction) = stop.prediction {
+            println!(
+                "{} {}: {} at {} ({}m away)",
+                stop.route,
+                stop.direction.unwrap(),
+                stop.name,
+                prediction.format("%I:%M %p"),
+                (prediction - chrono::Local::now().naive_local()).num_minutes()
+            );
+        } else {
+            println!("{}: {} (no prediction)", stop.route, stop.name);
+        }
+    }
     Ok(())
 }
