@@ -1,2 +1,2 @@
 # my-little-pal
-Help me get out the door good
+Let me ask my little pal
