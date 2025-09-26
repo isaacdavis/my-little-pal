@@ -3,19 +3,20 @@ use std::{collections::HashMap, time::Duration};
 use reqwest::Client;
 
 const ACT_ROUTES: &[(&str, u32)] = &[("51B", 600), ("27", 800), ("E", 1575)];
+const BART_STOPS: &[&str] = &["ROCK", "ASHB"];
 
 #[derive(Clone, Debug, serde::Deserialize)]
 #[serde(rename_all = "PascalCase")]
-struct Route {
+struct ActRoute {
     route: String,
     direction: String,
     destination: String,
-    stops: Vec<Stop>,
+    stops: Vec<ActStop>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
 #[serde(rename_all = "PascalCase")]
-struct Stop {
+struct ActStop {
     stop_id: u32,
     name: String,
     latitude: f32,
@@ -26,7 +27,7 @@ struct Stop {
 
 #[derive(Clone, Debug, serde::Deserialize)]
 #[serde(rename_all = "PascalCase")]
-struct Prediction {
+struct ActPrediction {
     stop_id: u32,
     trip_id: u32,
     vehicle_id: u32,
@@ -38,7 +39,7 @@ struct Prediction {
 
 #[derive(Clone, Debug, serde::Deserialize)]
 #[serde(rename_all = "PascalCase")]
-struct Trip {
+struct ActTrip {
     route_id: String,
     direction_id: u32,
     direction: String,
@@ -61,6 +62,45 @@ struct Trip {
     stop_latitude: f32,
 }
 
+#[derive(Clone, Debug, serde::Deserialize)]
+struct BartResponse {
+    root: BartRoot,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+struct BartRoot {
+    station: Vec<BartStation>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+struct BartStation {
+    name: String,
+    abbr: String,
+    etd: Vec<BartEtd>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+struct BartEtd {
+    destination: String,
+    abbreviation: String,
+    estimate: Vec<BartEstimate>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+struct BartEstimate {
+    minutes: String,
+    platform: String,
+    direction: String,
+    length: String,
+    color: String,
+    hexcolor: String,
+    bikeflag: String,
+    delay: String,
+    cancelflag: String,
+    dynamicflag: String,
+}
+
+#[derive(Clone, Debug)]
 struct StopInfo {
     route: String,
     name: String,
@@ -68,8 +108,48 @@ struct StopInfo {
     prediction: Option<chrono::NaiveDateTime>,
 }
 
+async fn fetch_bart() -> Result<Vec<StopInfo>, Box<dyn std::error::Error>> {
+    let token = "";
+    let client = Client::builder()
+        .timeout(Duration::from_secs(30)) // Set a 30-second request timeout
+        .build()?; // Build the client
+
+    let mut stops_info = Vec::new();
+
+    for station in BART_STOPS {
+        let url = format!(
+            "https://api.bart.gov/api/etd.aspx?cmd=etd&orig={}&key={}&json=y",
+            station, token
+        );
+
+        let resp: BartResponse = client.get(url).send().await?.json().await?;
+
+        for station in resp.root.station {
+            for etd in station.etd {
+                for estimate in etd.estimate {
+                    let minutes = if estimate.minutes == "Leaving" {
+                        0
+                    } else {
+                        estimate.minutes.parse::<i64>()?
+                    };
+                    let prediction =
+                        chrono::Local::now().naive_local() + chrono::Duration::minutes(minutes);
+                    stops_info.push(StopInfo {
+                        route: estimate.color,
+                        name: station.name.clone(),
+                        direction: Some(etd.destination.clone()),
+                        prediction: Some(prediction),
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(stops_info)
+}
+
 async fn fetch_act() -> Result<Vec<StopInfo>, Box<dyn std::error::Error>> {
-    let token = "7EFC6295F8261A1389A1134B9EDEE46B";
+    let token = "";
 
     let client = Client::builder()
         .timeout(Duration::from_secs(30)) // Set a 30-second request timeout
@@ -82,17 +162,17 @@ async fn fetch_act() -> Result<Vec<StopInfo>, Box<dyn std::error::Error>> {
             "https://api.actransit.org/transit/stops/37.855/-122.254/{}/true/{}?token={}",
             route.1, route.0, token
         );
-        let stops: Vec<Stop> = client.get(radius_url).send().await?.json().await?;
+        let stops: Vec<ActStop> = client.get(radius_url).send().await?.json().await?;
         for stop in stops {
             let trips_url = format!(
                 "https://api.actransit.org/transit/stops/{}/tripstoday?token={}",
                 stop.stop_id, token
             );
-            let trips: Vec<Trip> = client.get(trips_url).send().await?.json().await?;
-            let trips_by_id: HashMap<u32, Trip> =
+            let trips: Vec<ActTrip> = client.get(trips_url).send().await?.json().await?;
+            let trips_by_id: HashMap<u32, ActTrip> =
                 trips
                     .iter()
-                    .fold(HashMap::new(), |mut acc: HashMap<u32, Trip>, trip| {
+                    .fold(HashMap::new(), |mut acc: HashMap<u32, ActTrip>, trip| {
                         acc.insert(trip.trip_id, trip.clone());
                         acc
                     });
@@ -110,7 +190,7 @@ async fn fetch_act() -> Result<Vec<StopInfo>, Box<dyn std::error::Error>> {
                 });
                 continue;
             }
-            let predictions: Vec<Prediction> = predictions_check.json().await?;
+            let predictions: Vec<ActPrediction> = predictions_check.json().await?;
             let mut pushed = false;
             for prediction in &predictions {
                 if prediction.route_name != route.0 {
@@ -152,7 +232,9 @@ async fn fetch_act() -> Result<Vec<StopInfo>, Box<dyn std::error::Error>> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let stops = fetch_act().await?;
+    let act_stops = fetch_act().await?;
+    let bart_stops = fetch_bart().await?;
+    let stops = [act_stops, bart_stops].concat();
     for stop in stops {
         if let Some(prediction) = stop.prediction {
             println!(
